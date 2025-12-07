@@ -1,5 +1,5 @@
-/results
-/.vscode
+results/
+.vscode/
 /vscode
 
 .env
