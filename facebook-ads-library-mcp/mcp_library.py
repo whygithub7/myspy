@@ -1,3 +1,25 @@
+import sys
+import os
+import builtins
+
+# Redirect stderr to a log file for debugging
+log_file = open(r"c:\Users\ahmed\Desktop\myspy\mcp_debug.log", "w", encoding="utf-8", buffering=1)
+sys.stderr = log_file
+
+# Force binary mode for Windows
+if sys.platform == 'win32':
+    import msvcrt
+    msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+    msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+
+# Monkey-patch print to write to stderr by default to protect stdout stream
+# Monkey-patch print to write to stderr by default to protect stdout stream
+original_print = builtins.print
+def print_to_stderr(*args, **kwargs):
+    kwargs["file"] = sys.stderr
+    original_print(*args, **kwargs)
+builtins.print = print_to_stderr
+
 from mcp.server.fastmcp import FastMCP
 from src.services.scrapecreators_service import get_platform_id, get_ads, get_scrapecreators_api_key, get_platform_ids_batch, get_ads_batch, CreditExhaustedException, RateLimitException, search_ads_by_keyword
 from src.services.media_cache_service import media_cache, image_cache  # Keep image_cache for backward compatibility

@@ -685,11 +685,11 @@ def main():
             
             updated_urls = existing_urls.copy()
             new_ads_count = 0
-        else:
-            print(f"=== Сбор объявлений из {country} ===\n")
-            existing_ads = []
-            updated_urls = set()
-            new_ads_count = 0
+    else:
+        print(f"=== Сбор объявлений из {country} ===\n")
+        existing_ads = []
+        updated_urls = set()
+        new_ads_count = 0
     
     print(f"Ключевые слова: {', '.join(keywords)}\n")
     

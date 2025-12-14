@@ -1,6 +1,10 @@
 results/
+anigravity_server/
 .vscode/
 /vscode
+__pycache__/
+*.log
+Thumbs.db
 
 .env
 .env.*
