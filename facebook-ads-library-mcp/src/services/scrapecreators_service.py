@@ -173,6 +173,14 @@ def get_ads(
     country: Optional[str] = None,
     trim: bool = True
 ) -> List[Dict[str, Any]]:
+    # Преобразуем limit в int, если он передан как строка
+    if isinstance(limit, str):
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 50
+    elif limit is None:
+        limit = 50
     """
     Get ads for a specific page ID with pagination support.
     
@@ -189,6 +197,15 @@ def get_ads(
         requests.RequestException: If the API request fails.
         Exception: For other errors.
     """
+    # Преобразуем limit в int, если он передан как строка
+    if isinstance(limit, str):
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 50
+    elif limit is None:
+        limit = 50
+    
     api_key = get_scrapecreators_api_key()
     cursor = None
     headers = {
@@ -196,7 +213,7 @@ def get_ads(
     }
     params = {
         "pageId": page_id,
-        "limit": min(limit, 100)  # Ensure we don't exceed API limits
+        "limit": min(limit, 1500)  # ScrapeCreators API can return up to 1500 ads
     }
     
     # Add optional parameters if provided
@@ -284,6 +301,15 @@ def search_ads_by_keyword(
     Returns:
         List of ad objects.
     """
+    # Преобразуем limit в int, если он передан как строка
+    if isinstance(limit, str):
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 50
+    elif limit is None:
+        limit = 50
+    
     api_key = get_scrapecreators_api_key()
     cursor = None
     headers = {
@@ -292,7 +318,7 @@ def search_ads_by_keyword(
     }
     params = {
         "query": query,
-        "limit": min(limit, 100),
+        "limit": min(limit, 1500),  # ScrapeCreators API can return up to 1500 ads
         "ad_type": ad_type,
         "media_type": media_type,
         "active_status": active_status
@@ -305,7 +331,8 @@ def search_ads_by_keyword(
 
     ads = []
     total_requests = 0
-    max_requests = 10
+    # Увеличиваем max_requests для больших лимитов (до 1500 объявлений)
+    max_requests = max(10, (limit // 100) + 5)  # Достаточно запросов для сбора нужного количества
     
     while len(ads) < limit and total_requests < max_requests:
         if cursor:

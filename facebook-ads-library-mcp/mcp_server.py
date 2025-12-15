@@ -27,14 +27,21 @@ except Exception:
 # Исключаемые домены
 EXCLUDED_DOMAINS = [
     'page.', '*.reader.', '*.read.', '*.book.',
-    'hotmart', 'udemy', 'coursera', 'teachable',
-    'pay.', 'g.co', 'amazon.com',
-    'network.mynursingcommunity.com'
+    'hotmart.com', 'udemy.com', 'coursera.org', 'teachable.com',
+    'pay.', 'g.co', 'amazon.com', 'app.', 'temu.com',
+    'network.mynursingcommunity.com', 'apple.com',
+    'aliexpress.com', 'ebay.com', 'etsy.com', 'walmart.com', 'shein.com', 'shopify.com', 'rakuten.com', 'mercari.com', 'bestbuy.com',
+    'wayfair.com', 'carrefour.com', 'tokopedia.com', 'lazada.com', 'qoo10.sg', 'flipkart.com', 'zalando.com', 'coupang.com',
+    'jd.com', 'bing.com', 'wholesale.com', 'wish.com', 'target.com', 'argos.co.uk', 'asos.com', 'google.com',
+    'fnac.com', 'otto.de', 'allegro.pl', 'trendyol.com', 'farfetch.com',
+    'booking.com', 'expedia.com', 'airbnb.com', 'ubereats.com', 'doordash.com', 'grubhub.com', 'justeat.com',
+    'foodpanda.com', 'deliveroo.com', 'instacart.com', 
+    'facebook.com', 'fb.com', 'instagram.com', 'messenger.com', 'meta.com', 'threads.net', 'tiktok.com', 'youtube.com', 'twitter.com', 'linkedin.com', 'pinterest.com', 'reddit.com', 'quora.com', 'medium.com', 'quizlet.com',
 ]
 
 # Исключаемые пути в URL
 EXCLUDED_URL_PATHS = [
-    '/curso/', '/programa/', '/curso-online/', '/training/', '/academy/'
+    '/curso/', '/programa/', '/curso-online/', '/training/', '/academy/', '/app/'
 ]
 
 
@@ -357,7 +364,11 @@ def load_existing_ads(filepath: str) -> tuple:
 
 def save_results(ads: list, filename: str):
     """Сохраняет результаты в JSON файл."""
-    results_dir = "results"
+    # ВСЕГДА используем абсолютный путь к корню проекта
+    # Не используем os.getcwd(), так как MCP сервер может работать из другой директории
+    project_root = r"C:\Users\ahmed\Desktop\MySpy Cursor"
+    
+    results_dir = os.path.join(project_root, "results")
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
     
@@ -589,7 +600,7 @@ def search_facebook_ads(
     
     Args:
         query: The keyword(s) to search for (e.g., "running shoes", "crypto", "#sale").
-        limit: Maximum number of ads to retrieve (default: 50, max: 100).
+        limit: Maximum number of ads to retrieve (default: 50, max: 1500).
         country: Optional 2-letter country code (e.g., "US", "CA", "MX").
         active_status: Status of ads to search for ("ACTIVE", "ALL", "INACTIVE"). Default is "ACTIVE".
         media_type: Type of media to search for ("ALL", "IMAGE", "VIDEO"). Default is "ALL".
@@ -675,7 +686,7 @@ def search_facebook_ads(
 )
 def search_medical_ads_by_keyword(
     query: str,
-    limit: Optional[int] = 50,
+    limit: Union[int, str, None] = 50,
     country: Optional[str] = None,
     active_status: str = "ACTIVE",
     media_type: str = "ALL",
@@ -695,7 +706,7 @@ def search_medical_ads_by_keyword(
     
     Args:
         query: The keyword(s) to search for (e.g., "weight loss", "diabetes medicine").
-        limit: Maximum number of ads to retrieve (default: 50, max: 100).
+        limit: Maximum number of ads to retrieve (default: 50, max: 1500).
         country: Optional 2-letter country code (e.g., "US", "CA", "MX", "DE", "ES").
         active_status: Status of ads to search for ("ACTIVE", "ALL", "INACTIVE"). Default is "ACTIVE".
         media_type: Type of media to search for ("ALL", "IMAGE", "VIDEO"). Default is "ALL".
@@ -740,6 +751,13 @@ def search_medical_ads_by_keyword(
             "filtered_count": 0,
             "error": "Missing query"
         }
+    
+    # Преобразуем limit в int, если он передан как строка
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 50
     
     try:
         # Get API key first
@@ -808,17 +826,29 @@ def search_medical_ads_by_keyword(
         saved_count = filtered_count
         
         if target_file:
-            results_dir = "results"
+            # ВСЕГДА используем абсолютный путь к корню проекта
+            # Не используем os.getcwd(), так как MCP сервер может работать из другой директории
+            project_root = r"C:\Users\ahmed\Desktop\MySpy Cursor"
+            
+            results_dir = os.path.join(project_root, "results")
             if not os.path.exists(results_dir):
                 os.makedirs(results_dir)
             filepath = os.path.join(results_dir, target_file)
             
+            # Если файл существует и append_mode=True, дополняем файл
             if append_mode and os.path.exists(filepath):
                 existing_urls, existing_ads = load_existing_ads(filepath)
                 new_ads = filter_new_ads(formatted_ads, existing_urls, max_ads)
                 saved_count = len(new_ads)
                 final_ads = existing_ads + new_ads
+            # Если файл существует и append_mode=False, все равно дополняем (как в search_ads.py)
+            elif os.path.exists(filepath):
+                existing_urls, existing_ads = load_existing_ads(filepath)
+                new_ads = filter_new_ads(formatted_ads, existing_urls, max_ads)
+                saved_count = len(new_ads)
+                final_ads = existing_ads + new_ads
             else:
+                # Файл не существует - создаем новый
                 final_ads = formatted_ads[:max_ads] if max_ads else formatted_ads
                 saved_count = len(final_ads)
             
