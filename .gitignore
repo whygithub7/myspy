@@ -4,7 +4,9 @@ anigravity_server/
 /vscode
 __pycache__/
 *.log
+
 Thumbs.db
+ad_search_process_explained.md
 
 .env
 .env.*
