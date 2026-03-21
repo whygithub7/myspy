@@ -107,7 +107,9 @@ def get_scrapecreators_api_key() -> str:
         Exception: If no key is provided in command line arguments or environment.
     """
     global SCRAPECREATORS_API_KEY
-    if SCRAPECREATORS_API_KEY is None:
+    global SCRAPECREATORS_API_KEY
+    # Always reload from env to support key changes
+    if True: # Modified: Force check to allow dynamic updates
         # Try command line argument first
         if "--scrapecreators-api-key" in sys.argv:
             token_index = sys.argv.index("--scrapecreators-api-key") + 1
@@ -173,14 +175,6 @@ def get_ads(
     country: Optional[str] = None,
     trim: bool = True
 ) -> List[Dict[str, Any]]:
-    # Преобразуем limit в int, если он передан как строка
-    if isinstance(limit, str):
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 50
-    elif limit is None:
-        limit = 50
     """
     Get ads for a specific page ID with pagination support.
     
@@ -197,15 +191,6 @@ def get_ads(
         requests.RequestException: If the API request fails.
         Exception: For other errors.
     """
-    # Преобразуем limit в int, если он передан как строка
-    if isinstance(limit, str):
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 50
-    elif limit is None:
-        limit = 50
-    
     api_key = get_scrapecreators_api_key()
     cursor = None
     headers = {
@@ -213,7 +198,7 @@ def get_ads(
     }
     params = {
         "pageId": page_id,
-        "limit": min(limit, 1500)  # ScrapeCreators API can return up to 1500 ads
+        "limit": min(limit, 1500)  # Documentation suggests ~1500 limit for GET requests
     }
     
     # Add optional parameters if provided
@@ -224,7 +209,7 @@ def get_ads(
 
     ads = []
     total_requests = 0
-    max_requests = 10  # Allow more requests for comprehensive data
+    max_requests = 10
     
     while len(ads) < limit and total_requests < max_requests:
         if cursor:
@@ -279,12 +264,13 @@ def get_ads(
 
 def search_ads_by_keyword(
     query: str,
-    limit: int = 50,
+    limit: int = 100,
     country: Optional[str] = None,
     ad_type: str = "ALL",
     media_type: str = "ALL",
     active_status: str = "ACTIVE",
-    trim: bool = True
+    trim: bool = True,
+    cursor: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Search for ads by keyword.
@@ -297,47 +283,34 @@ def search_ads_by_keyword(
         media_type: Type of media ("ALL", "IMAGE", "VIDEO").
         active_status: Status of ads ("ACTIVE", "ALL", "INACTIVE").
         trim: Whether to trim the response.
+        cursor: Optional cursor to start/resume search from.
     
     Returns:
         List of ad objects.
     """
-    # Преобразуем limit в int, если он передан как строка
-    if isinstance(limit, str):
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            limit = 50
-    elif limit is None:
-        limit = 50
-    
     api_key = get_scrapecreators_api_key()
-    cursor = None
     headers = {
         "x-api-key": api_key,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    # ScrapeCreators expects specific lowercase values for ad_type:
-    # - "all"
-    # - "political_and_issue_ads"
+    # Normalize ad_type to ScrapeCreators expected values
     scrape_ad_type: Optional[str] = None
     if ad_type:
         upper = ad_type.upper()
         if upper == "ALL":
-            # Default behavior, omit param and let API use its default
-            scrape_ad_type = None
+            scrape_ad_type = None  # let API use default "all"
         elif upper == "POLITICAL_AND_ISSUE_ADS":
             scrape_ad_type = "political_and_issue_ads"
         else:
-            # Pass through any custom value as-is
             scrape_ad_type = ad_type
 
     params: Dict[str, Any] = {
         "query": query,
-        "limit": min(limit, 1500),  # ScrapeCreators API can return up to 1500 ads
+        "limit": 10,  # Very small chunks to prevent API timeouts
         "media_type": media_type,
         "status": active_status,  # API expects "status", not "active_status"
-        "search_type": "keyword_unordered",  # Broader matching; exact phrase often returns 0 in small markets
+        "search_type": "keyword_unordered",  # Broader matching; exact phrase often returns 0
     }
 
     if scrape_ad_type is not None:
@@ -352,20 +325,33 @@ def search_ads_by_keyword(
 
     ads = []
     total_requests = 0
-    # Увеличиваем max_requests для больших лимитов (до 1500 объявлений)
-    max_requests = max(10, (limit // 100) + 5)  # Достаточно запросов для сбора нужного количества
+    max_requests = 10
     
     while len(ads) < limit and total_requests < max_requests:
         if cursor:
             params['cursor'] = cursor
         
         try:
-            response = requests.get(
-                SEARCH_ADS_API_URL, 
-                headers=headers, 
-                params=params,
-                timeout=30
-            )
+            # Add a small retry for timeouts
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    response = requests.get(
+                        SEARCH_ADS_API_URL, 
+                        headers=headers, 
+                        params=params,
+                        timeout=70.0,
+                        verify=False,
+                        proxies={"http": None, "https": None}
+                    )
+                    break
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+                    if attempt == max_retries - 1:
+                        raise net_err
+                    logger.warning(f"Retry {attempt+1} due to network error: {net_err}")
+                    import time
+                    time.sleep(2)
+
             total_requests += 1
             
             try:
@@ -379,7 +365,7 @@ def search_ads_by_keyword(
                 break
                 
             resJson = response.json()
-            # Log raw-level summary of the response from ScrapeCreators
+
             if isinstance(resJson, dict):
                 logger.error(
                     f"DEBUG_SCRAPE_CREATORS_RESPONSE query={query!r} "
@@ -390,15 +376,19 @@ def search_ads_by_keyword(
 
             # The search API returns 'searchResults' instead of 'results'
             search_results = resJson.get('searchResults', [])
-            logger.info(f"Retrieved {len(search_results)} ads from search API (request {total_requests})")
+            logger.info(f"Retrieved {len(search_results)} ads from search API (request {total_requests}/{max_requests})")
             
+            # If empty results and no cursor, we are done
+            if not search_results:
+                 logger.info("Empty results received")
+                 
             # Transform the response to match the expected structure for parse_fb_ads
-            # parse_fb_ads expects {'results': [...]}
             transformed_response = {'results': search_results}
             
             # Use the same parser but don't filter inactive since API already filtered for ACTIVE
             res_ads = parse_fb_ads(transformed_response, trim, filter_inactive=False)
-            if len(res_ads) == 0:
+            
+            if len(res_ads) == 0 and not resJson.get('cursor'):
                 logger.info("No more ads found, stopping pagination")
                 break
                 

@@ -4,7 +4,7 @@ import logging
 from dotenv import load_dotenv
 
 # Ensure .env is loaded (override to beat Cursor's stale env)
-_env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
+_env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
 load_dotenv(os.path.normpath(_env_path), override=True)
 
 import google.generativeai as genai
@@ -53,7 +53,7 @@ def configure_gemini() -> genai.GenerativeModel:
     Configure Gemini API with the API key and return a model instance.
     
     Returns:
-        genai.GenerativeModel: Configured Gemini model instance for media analysis
+        genai.GenerativeModel: Configured Gemini model instance for video analysis
     """
     api_key = get_gemini_api_key()
     genai.configure(api_key=api_key)
@@ -127,6 +127,38 @@ def analyze_video_with_gemini(model: genai.GenerativeModel, video_file: File, pr
         
     except Exception as e:
         logger.error(f"Video analysis failed: {str(e)}")
+        raise
+
+
+def analyze_image_with_gemini(model: genai.GenerativeModel, image_bytes: bytes, prompt: str, mime_type: str = "image/jpeg") -> str:
+    """
+    Analyze an image using Gemini with a custom prompt.
+    
+    Args:
+        model: Configured Gemini model instance
+        image_bytes: Raw image bytes
+        prompt: Analysis prompt
+        mime_type: MIME type of the image
+        
+    Returns:
+        str: Analysis results from Gemini
+    """
+    try:
+        image_part = {
+            "mime_type": mime_type,
+            "data": image_bytes
+        }
+        
+        response = model.generate_content([prompt, image_part])
+        
+        if not response.text:
+            raise Exception("Gemini returned empty response")
+            
+        logger.info("Image analysis completed successfully")
+        return response.text
+        
+    except Exception as e:
+        logger.error(f"Image analysis failed: {str(e)}")
         raise
 
 

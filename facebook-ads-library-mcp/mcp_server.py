@@ -2,6 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from src.services.scrapecreators_service import get_platform_id, get_ads, get_scrapecreators_api_key, get_platform_ids_batch, get_ads_batch, CreditExhaustedException, RateLimitException, search_ads_by_keyword
 from src.services.media_cache_service import media_cache, image_cache  # Keep image_cache for backward compatibility
 from src.services.gemini_service import configure_gemini, upload_video_to_gemini, analyze_video_with_gemini, cleanup_gemini_file, analyze_videos_batch_with_gemini, upload_videos_batch_to_gemini, cleanup_gemini_files_batch, get_gemini_api_key
+from mcp_library import analyze_media_func as gemini_analyze_media_func
 from typing import Dict, Any, List, Optional, Union
 from collections import defaultdict
 import requests
@@ -10,9 +11,14 @@ import tempfile
 import os
 from dotenv import load_dotenv
 import json
+import logging
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env (override=True so our key overrides Cursor's env)
+_env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(_env_path, override=True)
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 # Глобальная переменная для отслеживания квоты Gemini
 GEMINI_QUOTA_EXHAUSTED = False
@@ -26,22 +32,48 @@ except Exception:
 
 # Исключаемые домены
 EXCLUDED_DOMAINS = [
-    'page.', '*.reader.', '*.read.', '*.book.',
-    'hotmart.com', 'udemy.com', 'coursera.org', 'teachable.com',
-    'pay.', 'g.co', 'amazon.com', 'app.', 'temu.com',
-    'network.mynursingcommunity.com', 'apple.com',
-    'aliexpress.com', 'ebay.com', 'etsy.com', 'walmart.com', 'shein.com', 'shopify.com', 'rakuten.com', 'mercari.com', 'bestbuy.com',
-    'wayfair.com', 'carrefour.com', 'tokopedia.com', 'lazada.com', 'qoo10.sg', 'flipkart.com', 'zalando.com', 'coupang.com',
-    'jd.com', 'bing.com', 'wholesale.com', 'wish.com', 'target.com', 'argos.co.uk', 'asos.com', 'google.com',
-    'fnac.com', 'otto.de', 'allegro.pl', 'trendyol.com', 'farfetch.com',
-    'booking.com', 'expedia.com', 'airbnb.com', 'ubereats.com', 'doordash.com', 'grubhub.com', 'justeat.com',
-    'foodpanda.com', 'deliveroo.com', 'instacart.com', 
-    'facebook.com', 'fb.com', 'instagram.com', 'messenger.com', 'meta.com', 'threads.net', 'tiktok.com', 'youtube.com', 'twitter.com', 'linkedin.com', 'pinterest.com', 'reddit.com', 'quora.com', 'medium.com', 'quizlet.com',
+    # General Marketplaces (Global/EU/LATAM)
+    'amazon', 'amzn', 'ebay', 'aliexpress', 'alibaba', 'temu', 'shein', 'shopee', 'dhgate',
+    'mercadolibre', 'mercadolivre', 'mercadopago',  # LATAM giants
+    'falabella', 'linio', 'liverpool.com.mx', 'coppel', 'walmart', 'carrefour', 'elcorteingles',
+    'wish.com', 'etsy', 'rakuten', 'zalando', 'asos', 'allegro', 'cdiscount', 'fnac', 'bol.com',
+    
+    # App Stores & Digital Content
+    'play.google.com', 'apps.apple.com', 'itunes.apple.com', 'app.apple.com',
+    'store.steampowered', 'epicgames', 'microsoft.com/store',
+    'wattpad', 'webtoon', 'goodreads', 'audible', '*.reader', '*.book',
+    
+    # Educational & Courses
+    'hotmart', 'udemy', 'coursera', 'teachable', 'skillshare', 'masterclass', 'domestika', 'crehana',
+    
+    # Payment & Services
+    'pay.', 'paypal', 'stripe', 'shopify.com',
+    
+    # Social & Messaging & Video (Internal/External)
+    'facebook', 'fb.me', 'fb.com', 'instagram', 'whatsapp', 'wa.me', 'messenger',
+    'twitter', 'x.com', 'tiktok', 'snapchat', 'pinterest', 'linkedin', 'reddit', 'tumblr',
+    'youtube', 'youtu.be', 'vimeo', 'dailymotion', 'twitch',
+    't.me', 'telegram', 'discord',
+    
+    # Google Services
+    'google', 'g.co', 'goo.gl', 'maps.app.goo.gl', 'forms.gle', 'drive.google', 'docs.google',
+    
+    # Medical/Wellness (Official/Telehealth)
+    'betterhelp', 'talkspace', 'doctoralia', 'mayoclinic', 'webmd', 'healthline',
+    'network.mynursingcommunity.com',
+    
+    # Sports/Branded Fitness
+    'nike', 'adidas', 'puma', 'underarmour', 'reebok', 'gymshark', 'decathlon',
+    'myfitnesspal', 'strava'
 ]
 
 # Исключаемые пути в URL
 EXCLUDED_URL_PATHS = [
-    '/curso/', '/programa/', '/curso-online/', '/training/', '/academy/', '/app/'
+    '/curso/', '/programa/', '/curso-online/', '/training/', '/academy/',
+    '/shop/', '/store/', '/marketplace/', '/cart/', '/checkout/',
+    '/psycholog', '/therapy/', '/counseling/', '/hypnosis/',
+    '/fitness/', '/gym/', '/workout/',
+    '/product/', '/item/'
 ]
 
 
@@ -91,14 +123,28 @@ def check_if_excluded_content_via_gemini(analysis_text: str) -> bool:
         context_prompt = """Analyze the following Facebook ad content analysis and determine if this ad promotes:
 
 1. Online courses, training programs, educational courses (NOT medical treatment courses)
-2. Reading applications, e-book apps, or similar applications
-3. Educational platforms (Udemy, Coursera, Hotmart, Teachable, etc.)
+        2. Reading applications, e-book apps, or similar applications
+        3. Educational platforms (Udemy, Coursera, Hotmart, Teachable, etc.)
+        4. Marketplaces (Amazon, eBay, AliExpress, Mercado Libre, general e-commerce platforms)
+        5. Psychology services (психология, психотерапия, консультации психолога, психологические тренинги, коучинг)
+        6. Hypnosis services (гипноз, гипнотерапия, hypnotherapy)
+        7. Sports, fitness, or gym (фитнес, спорт, тренажерный зал, спортивное питание, gym, workout equipment, athletic training)
+        8. General wellness or self-help not related to specific medical treatment (мотивация, личностный рост, саморазвитие)
+        9. Information products (инфо-продукты, инфо-курсы, вебинары, мастер-классы)
+        10. Physical consumer goods NOT related to medical treatment (watches, jewelry, clothing, shoes, general electronics, gadgets, automotive, real estate)
 
 IMPORTANT CONTEXT:
-- "Course of treatment" or "medical course" (курс лечения) = ACCEPTABLE (medical treatment)
-- "Training course" or "online course" = EXCLUDE (educational content)
-- Medical devices like tonometer (тонометр) or glucometer (глюкометр) in medical product ads = ACCEPTABLE
-- Reading apps, e-book apps = EXCLUDE
+    - "Course of treatment" or "medical course" (курс лечения) = ACCEPTABLE (medical treatment)
+    - "Training course" or "online course" = EXCLUDE (educational content)
+    - Medical devices like tonometer or glucometer in medical product ads = ACCEPTABLE
+    - Medical supplements, vitamins, medicines for specific conditions = ACCEPTABLE
+    - Reading apps, e-book apps = EXCLUDE
+    - Sports equipment, gym memberships, fitness coaching = EXCLUDE
+    - Psychological counseling, therapy sessions, mental wellness coaching = EXCLUDE
+    - Hypnosis for any purpose = EXCLUDE
+    - General marketplace ads (selling variety of products) = EXCLUDE
+    - Watches (smart or classic), Jewelry, Clothing, Fashion = EXCLUDE
+    - Reading apps, e-book apps = EXCLUDE
 
 Respond with ONLY one word: "EXCLUDE" if the ad should be excluded, or "KEEP" if it should be kept.
 
@@ -123,11 +169,11 @@ Content analysis:
             if not GEMINI_QUOTA_EXHAUSTED:
                 GEMINI_QUOTA_EXHAUSTED = True
                 if 'leaked' in error_str or '403' in error_str:
-                    print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                    print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                     print(f"   Ошибка: {e}")
                     print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
                 else:
-                    print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+                    print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
             return False
         # В случае другой ошибки не исключаем объявление (fail-safe)
         print(f"Warning: Gemini context check failed: {e}")
@@ -209,7 +255,8 @@ def analyze_media(ad: Dict[str, Any]) -> Dict[str, Any]:
         'analysis_error': None
     }
     
-    if not media_url or GEMINI_QUOTA_EXHAUSTED:
+    # Если нет URL медиа, анализ невозможен
+    if not media_url:
         return analysis_result
     
     try:
@@ -235,11 +282,11 @@ def analyze_media(ad: Dict[str, Any]) -> Dict[str, Any]:
                     if not GEMINI_QUOTA_EXHAUSTED:
                         GEMINI_QUOTA_EXHAUSTED = True
                         if 'leaked' in error_str or '403' in error_str:
-                            print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                            print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                             print(f"   Ошибка: {error}")
                             print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
                         else:
-                            print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+                            print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
         
         elif media_type == 'VIDEO':
             result = analyze_ad_video(
@@ -257,13 +304,14 @@ def analyze_media(ad: Dict[str, Any]) -> Dict[str, Any]:
                     if not GEMINI_QUOTA_EXHAUSTED:
                         GEMINI_QUOTA_EXHAUSTED = True
                         if 'leaked' in error_str or '403' in error_str:
-                            print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                            print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                             print(f"   Ошибка: {error}")
                             print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
                         else:
-                            print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+                            print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
         
-        elif media_type == 'DCO':
+        elif media_type in ('DCO', 'CAROUSEL'):
+            # DCO and CAROUSEL: media_url points to image(s), analyze first frame as image
             result = analyze_ad_image(
                 media_urls=media_url,
                 brand_name=None,
@@ -285,18 +333,18 @@ def analyze_media(ad: Dict[str, Any]) -> Dict[str, Any]:
                     if not GEMINI_QUOTA_EXHAUSTED:
                         GEMINI_QUOTA_EXHAUSTED = True
                         if 'leaked' in error_str or '403' in error_str:
-                            print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                            print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                             print(f"   Ошибка: {error}")
                             print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
                         else:
-                            print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+                            print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
     
     except Exception as e:
         error_str = str(e).lower()
         analysis_result['analysis_error'] = str(e)
         if any(keyword in error_str for keyword in ['quota', 'resource exhausted', 'credit', 'rate limit', '429', '503']):
             GEMINI_QUOTA_EXHAUSTED = True
-            print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+            print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
     
     return analysis_result
 
@@ -593,7 +641,7 @@ def get_meta_platform_id(brand_names: Union[str, List[str]]) -> Dict[str, Any]:
 )
 def search_facebook_ads(
     query: str,
-    limit: Optional[int] = 50,
+    limit: Union[int, str, None] = 100,
     country: Optional[str] = None,
     active_status: str = "ACTIVE",
     media_type: str = "ALL"
@@ -602,7 +650,7 @@ def search_facebook_ads(
     
     Args:
         query: The keyword(s) to search for (e.g., "running shoes", "crypto", "#sale").
-        limit: Maximum number of ads to retrieve (default: 50, max: 1500).
+        limit: Maximum number of ads to retrieve (default: 100, max: 1500).
         country: Optional 2-letter country code (e.g., "US", "CA", "MX").
         active_status: Status of ads to search for ("ACTIVE", "ALL", "INACTIVE"). Default is "ACTIVE".
         media_type: Type of media to search for ("ALL", "IMAGE", "VIDEO"). Default is "ALL".
@@ -619,13 +667,20 @@ def search_facebook_ads(
             "error": "Missing query"
         }
     
+    # Преобразуем limit в int, если он передан как строка
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 100
+    
     try:
         # Get API key first
         get_scrapecreators_api_key()
         
         ads = search_ads_by_keyword(
             query=query,
-            limit=limit or 50,
+            limit=limit or 100,
             country=country,
             active_status=active_status,
             media_type=media_type,
@@ -688,7 +743,7 @@ def search_facebook_ads(
 )
 def search_medical_ads_by_keyword(
     query: str,
-    limit: Union[int, str, None] = 50,
+    limit: Union[int, str, None] = 100,
     country: Optional[str] = None,
     active_status: str = "ACTIVE",
     media_type: str = "ALL",
@@ -762,20 +817,9 @@ def search_medical_ads_by_keyword(
             limit = 50
     
     try:
-        # Получаем функцию analyze_media из модуля ДО того, как параметр перекроет её имя
-        # Используем __dict__ модуля напрямую, чтобы гарантированно получить функцию, а не параметр
-        import sys
-        import types
-        current_module = sys.modules[__name__]
-        # Получаем функцию напрямую из словаря модуля
-        analyze_media_func = current_module.__dict__.get('analyze_media')
-        # Проверяем, что это действительно функция
-        if not isinstance(analyze_media_func, types.FunctionType):
-            # Если это не функция, значит что-то пошло не так - используем альтернативный способ
-            # Импортируем модуль заново, чтобы получить функцию
-            import importlib
-            module = importlib.import_module(__name__)
-            analyze_media_func = getattr(module, 'analyze_media')
+        # Используем реализацию анализа медиа из mcp_library,
+        # которая завязана на Gemini и кеши изображений/видео
+        analyze_media_func = gemini_analyze_media_func
         
         # Сохраняем значение параметра в отдельную переменную
         should_analyze_media = analyze_media
@@ -855,7 +899,7 @@ def search_medical_ads_by_keyword(
                 # Затем анализ медиа (выполняется до финальной фильтрации)
                 ad['search_query'] = query
                 
-                if should_analyze_media and not GEMINI_QUOTA_EXHAUSTED:
+                if should_analyze_media:
                     media_analysis = analyze_media_func(ad)
                     ad['media_analysis'] = media_analysis
                 
@@ -1262,7 +1306,7 @@ def get_meta_ads_external_only(
         get_scrapecreators_api_key()
         
         # Calculate how many ads to fetch (may need more to find enough external ones)
-        fetch_limit = limit or 50
+        fetch_limit = limit or 100
         if min_results and min_results > fetch_limit:
             fetch_limit = min(min_results * 2, 500)  # Fetch up to 2x to find enough external ads
         
@@ -1631,7 +1675,7 @@ def analyze_ad_image(media_urls: Union[str, List[str]], brand_name: Optional[str
             if not GEMINI_QUOTA_EXHAUSTED:
                 GEMINI_QUOTA_EXHAUSTED = True
                 if 'leaked' in error_str or '403' in error_str:
-                    print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                    print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                     print(f"   Ошибка: {e}")
                     print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
         return {
@@ -1649,7 +1693,7 @@ def analyze_ad_image(media_urls: Union[str, List[str]], brand_name: Optional[str
             if not GEMINI_QUOTA_EXHAUSTED:
                 GEMINI_QUOTA_EXHAUSTED = True
                 if 'leaked' in error_str or '403' in error_str:
-                    print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                    print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                     print(f"   Ошибка: {e}")
                     print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
         return {
@@ -2059,7 +2103,7 @@ def analyze_ad_video(media_url: str, brand_name: Optional[str] = None, ad_id: Op
             analysis_results = {
                 "raw_analysis": analysis_text,
                 "analysis_timestamp": media_cache._generate_url_hash(str(hash(analysis_text))),
-                "model_used": "gemini-2.5-flash-preview-09-2025",
+                "model_used": "gemini-3.1-flash-lite-preview",
                 "video_metadata": {
                     "file_size_mb": round(file_size / (1024 * 1024), 2) if file_size else None,
                     "duration_seconds": duration_seconds,
@@ -2102,11 +2146,11 @@ def analyze_ad_video(media_url: str, brand_name: Optional[str] = None, ad_id: Op
                 if not GEMINI_QUOTA_EXHAUSTED:
                     GEMINI_QUOTA_EXHAUSTED = True
                     if 'leaked' in error_str or '403' in error_str:
-                        print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                        print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                         print(f"   Ошибка: {e}")
                         print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
                     else:
-                        print(f"\n⚠ Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
+                        print("\n[WARNING] Квота Gemini исчерпана. Пропускаем анализ медиа для оставшихся объявлений.")
             
             raise e
         
@@ -2117,7 +2161,7 @@ def analyze_ad_video(media_url: str, brand_name: Optional[str] = None, ad_id: Op
             if not GEMINI_QUOTA_EXHAUSTED:
                 GEMINI_QUOTA_EXHAUSTED = True
                 if 'leaked' in error_str or '403' in error_str:
-                    print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                    print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                     print(f"   Ошибка: {e}")
                     print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
         return {
@@ -2135,7 +2179,7 @@ def analyze_ad_video(media_url: str, brand_name: Optional[str] = None, ad_id: Op
             if not GEMINI_QUOTA_EXHAUSTED:
                 GEMINI_QUOTA_EXHAUSTED = True
                 if 'leaked' in error_str or '403' in error_str:
-                    print(f"\n⚠ ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
+                    print("\n[WARNING] ОШИБКА: API ключ Gemini заблокирован или утерян. Прерываем анализ медиа.")
                     print(f"   Ошибка: {e}")
                     print(f"   Пожалуйста, обновите API ключ Gemini и перезапустите скрипт.")
         return {
@@ -2377,7 +2421,7 @@ def analyze_ad_videos_batch(media_urls: List[str], brand_names: Optional[List[st
                                 analysis_results_data = {
                                     "raw_analysis": analysis_text,
                                     "analysis_timestamp": media_cache._generate_url_hash(str(hash(analysis_text))),
-                                    "model_used": "gemini-2.5-flash-preview-09-2025",
+                                    "model_used": "gemini-3.1-flash-lite-preview",
                                     "batch_analysis": True,
                                     "batch_position": i + 1,
                                     "total_batch_size": len(videos_to_analyze)
